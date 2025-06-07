@@ -21,6 +21,8 @@ from typing import List, Dict, Any, Optional
 import sys
 import os
 from datetime import datetime
+import hashlib
+import pickle
 
 # Add project root to path
 sys.path.append(os.path.dirname(__file__))
@@ -42,8 +44,9 @@ from preprocessing.text_pipeline import TextPreprocessingPipeline, CorpusProcess
 from preprocessing.statistical_analyzer import StatisticalAnalyzer
 from word_cluster.syllable_api import SyllableSegmentationAPI, SegmentationMethod
 from word_cluster.syllable_frequency_analyzer import SyllableFrequencyAnalyzer
-from statistical_models.character_ngram_models import CharacterNgramModel, NgramModelTrainer
-from statistical_models.syllable_ngram_models import SyllableNgramModel, SyllableNgramModelTrainer
+from statistical_models.character_ngram_model import CharacterNgramModel, NgramModelTrainer
+from statistical_models.syllable_ngram_model import SyllableNgramModel, SyllableNgramModelTrainer
+from statistical_models.smoothing_techniques import SmoothingMethod
 from statistical_models.rule_based_validator import RuleBasedValidator
 from statistical_models.hybrid_validator import HybridValidator
 from statistical_models.ensemble_optimizer import EnsembleOptimizer
@@ -67,6 +70,10 @@ class ModelTrainingPipeline:
         (self.output_dir / "neural_models").mkdir(exist_ok=True)
         (self.output_dir / "ensemble_configs").mkdir(exist_ok=True)
         
+        # Create cache directory
+        self.cache_dir = self.output_dir / "cache"
+        self.cache_dir.mkdir(exist_ok=True)
+        
         # Training statistics
         self.training_stats = {
             'start_time': None,
@@ -79,6 +86,117 @@ class ModelTrainingPipeline:
         logger.info(f"Training pipeline initialized")
         logger.info(f"Data directory: {self.data_dir}")
         logger.info(f"Output directory: {self.output_dir}")
+    
+    def clear_data_cache(self):
+        """Clear cached preprocessed data files"""
+        try:
+            cache_files_removed = 0
+            for cache_file in self.cache_dir.glob("preprocessed_*"):
+                cache_file.unlink()
+                cache_files_removed += 1
+            
+            if cache_files_removed > 0:
+                logger.info(f"Cleared {cache_files_removed} cache files")
+            else:
+                logger.info("No cache files found to clear")
+                
+        except Exception as e:
+            logger.warning(f"Error clearing cache: {e}")
+    
+    def _get_cache_key(self) -> str:
+        """Generate a unique cache key based on data directory and configuration"""
+        # Include data directory path and relevant config parameters
+        cache_data = {
+            'data_dir': str(self.data_dir.resolve()),
+            'max_files': self.config.get('max_files'),
+            'min_khmer_ratio': self.config.get('min_khmer_ratio'),
+            'min_text_length': self.config.get('min_text_length'),
+            'batch_size': self.config.get('batch_size')
+        }
+        cache_string = json.dumps(cache_data, sort_keys=True)
+        return hashlib.md5(cache_string.encode()).hexdigest()
+    
+    def _get_cache_files(self) -> tuple:
+        """Get cache file paths for data and metadata"""
+        cache_key = self._get_cache_key()
+        data_file = self.cache_dir / f"preprocessed_data_{cache_key}.pkl"
+        meta_file = self.cache_dir / f"preprocessed_meta_{cache_key}.json"
+        return data_file, meta_file
+    
+    def _is_cache_valid(self) -> bool:
+        """Check if cache files exist and are newer than source data"""
+        data_file, meta_file = self._get_cache_files()
+        
+        if not (data_file.exists() and meta_file.exists()):
+            return False
+        
+        # Get cache timestamp
+        cache_time = min(data_file.stat().st_mtime, meta_file.stat().st_mtime)
+        
+        # Check if any source files are newer than cache
+        try:
+            for file_path in self.data_dir.rglob("*"):
+                if file_path.is_file() and file_path.stat().st_mtime > cache_time:
+                    logger.info(f"Cache invalid: {file_path} is newer than cache")
+                    return False
+        except (OSError, PermissionError) as e:
+            logger.warning(f"Error checking source file times: {e}")
+            return False
+        
+        return True
+    
+    def _load_cached_data(self) -> Optional[List[str]]:
+        """Load preprocessed data from cache files"""
+        try:
+            data_file, meta_file = self._get_cache_files()
+            
+            # Load metadata
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            
+            # Load data
+            with open(data_file, 'rb') as f:
+                texts = pickle.load(f)
+            
+            # Restore training stats
+            self.training_stats['data_stats'] = metadata.get('data_stats', {})
+            
+            return texts
+            
+        except Exception as e:
+            logger.warning(f"Failed to load cached data: {e}")
+            return None
+    
+    def _save_cached_data(self, texts: List[str]):
+        """Save preprocessed data to cache files"""
+        try:
+            data_file, meta_file = self._get_cache_files()
+            
+            # Save metadata
+            metadata = {
+                'cache_key': self._get_cache_key(),
+                'data_dir': str(self.data_dir),
+                'num_texts': len(texts),
+                'total_characters': sum(len(text) for text in texts),
+                'cached_at': datetime.now().isoformat(),
+                'config': {k: v for k, v in self.config.items() if k in [
+                    'max_files', 'min_khmer_ratio', 'min_text_length', 'batch_size'
+                ]},
+                'data_stats': self.training_stats.get('data_stats', {})
+            }
+            
+            with open(meta_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            
+            # Save data
+            with open(data_file, 'wb') as f:
+                pickle.dump(texts, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            logger.info(f"   - Data cached to: {data_file}")
+            logger.info(f"   - Metadata cached to: {meta_file}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save cached data: {e}")
     
     def _get_default_config(self) -> Dict[str, Any]:
         """Get default training configuration"""
@@ -138,6 +256,18 @@ class ModelTrainingPipeline:
         start_time = time.time()
         
         try:
+            # Check for valid cached data
+            if self._is_cache_valid():
+                logger.info("✅ Using cached preprocessed data")
+                cached_texts = self._load_cached_data()
+                if cached_texts is not None:
+                    logger.info(f"   - Cached texts: {len(cached_texts):,}")
+                    logger.info(f"   - Data directory: {self.data_dir}")
+                    logger.info(f"   - Cache files: {self._get_cache_files()[0].name}")
+                    return cached_texts
+                else:
+                    logger.warning("Failed to load cached data, proceeding with fresh processing")
+            
             # Load files
             logger.info(f"Loading files from {self.data_dir}")
             loader = FileLoader(str(self.data_dir))
@@ -153,15 +283,14 @@ class ModelTrainingPipeline:
             pipeline = TextPreprocessingPipeline(
                 segmentation_method='regex_advanced',
                 min_khmer_ratio=self.config['min_khmer_ratio'],
-                min_text_length=self.config['min_text_length'],
-                max_text_length=self.config['max_text_length']
+                min_text_length=self.config['min_text_length']
             )
             
             all_texts = []
             total_processed = 0
             
             for doc in documents:
-                logger.info(f"Processing document: {doc.filename} ({doc.size_mb:.1f}MB)")
+                logger.info(f"Processing document: {doc.filename} ({doc.size / (1024 * 1024):.1f}MB)")
                 
                 # Process document
                 results = pipeline.process_document(doc)
@@ -186,6 +315,9 @@ class ModelTrainingPipeline:
                 'average_text_length': avg_length,
                 'processing_time': processing_time
             }
+            
+            # Save processed data to cache files
+            self._save_cached_data(all_texts)
             
             logger.info(f"✅ Data preprocessing completed:")
             logger.info(f"   - Total texts: {len(all_texts):,}")
@@ -212,39 +344,38 @@ class ModelTrainingPipeline:
         model_paths = {}
         
         try:
-            # Initialize trainer
-            trainer = NgramModelTrainer(
-                filter_non_khmer=self.config['char_filter_non_khmer'],
-                keep_khmer_punctuation=self.config['char_keep_khmer_punctuation'],
-                keep_spaces=self.config['char_keep_spaces']
-            )
-            
             # Train models for each n-gram size
             for n in self.config['character_ngrams']:
                 logger.info(f"Training character {n}-gram model...")
                 
-                model = trainer.train_model(
-                    texts=texts,
+                # Create individual model
+                model = CharacterNgramModel(
                     n=n,
-                    smoothing_method=self.config['char_smoothing_method']
+                    smoothing_method=SmoothingMethod[self.config['char_smoothing_method'].upper()],
+                    filter_non_khmer=self.config['char_filter_non_khmer'],
+                    keep_khmer_punctuation=self.config['char_keep_khmer_punctuation'],
+                    keep_spaces=self.config['char_keep_spaces']
                 )
+                
+                # Train the model
+                stats = model.train_on_texts(texts, show_progress=True)
                 
                 # Save model
                 model_filename = f"character_{n}gram_model"
                 json_path = self.output_dir / "statistical_models" / f"{model_filename}.json"
                 pkl_path = self.output_dir / "statistical_models" / f"{model_filename}.pkl"
                 
-                model.save_model(str(json_path), format='json')
-                model.save_model(str(pkl_path), format='pickle')
+                model.save_model(str(json_path))
+                model.save_model(str(pkl_path))
                 
                 model_paths[f'character_{n}gram'] = {
                     'json': str(json_path),
                     'pickle': str(pkl_path),
-                    'vocab_size': len(model.vocab),
-                    'total_ngrams': len(model.ngram_counts)
+                    'vocab_size': stats.vocabulary_size,
+                    'total_ngrams': stats.total_ngrams
                 }
                 
-                logger.info(f"   ✅ Character {n}-gram model: {len(model.vocab)} vocab, {len(model.ngram_counts):,} n-grams")
+                logger.info(f"   ✅ Character {n}-gram model: {stats.vocabulary_size} vocab, {stats.total_ngrams:,} n-grams")
             
             training_time = time.time() - start_time
             
@@ -292,40 +423,45 @@ class ModelTrainingPipeline:
             
             logger.info(f"Total syllables: {total_syllables:,}")
             
-            # Initialize trainer with filtering
-            trainer = SyllableNgramModelTrainer(
-                filter_non_khmer=self.config['syll_filter_non_khmer'],
-                min_khmer_ratio=self.config['syll_min_khmer_ratio'],
-                filter_multidigit_numbers=self.config['syll_filter_multidigit_numbers'],
-                max_digit_length=self.config['syll_max_digit_length']
-            )
-            
             # Train models for each n-gram size
             for n in self.config['syllable_ngrams']:
                 logger.info(f"Training syllable {n}-gram model...")
                 
-                model = trainer.train_model(
-                    syllable_sequences=syllable_sequences,
+                # Create individual model
+                model = SyllableNgramModel(
                     n=n,
-                    smoothing_method=self.config['syll_smoothing_method']
+                    smoothing_method=SmoothingMethod[self.config['syll_smoothing_method'].upper()],
+                    segmentation_method=SegmentationMethod.REGEX_ADVANCED,
+                    filter_invalid_syllables=self.config['syll_filter_non_khmer'],
+                    min_syllable_length=1,
+                    max_syllable_length=self.config['syll_max_digit_length']
                 )
+                
+                # Train the model on syllable sequences
+                # Convert syllable sequences to texts for training
+                syllable_texts = []
+                for seq in syllable_sequences:
+                    if seq:  # Only add non-empty sequences
+                        syllable_texts.append(' '.join(seq))
+                
+                stats = model.train_on_texts(syllable_texts, show_progress=True)
                 
                 # Save model
                 model_filename = f"syllable_{n}gram_model"
                 json_path = self.output_dir / "statistical_models" / f"{model_filename}.json"
                 pkl_path = self.output_dir / "statistical_models" / f"{model_filename}.pkl"
                 
-                model.save_model(str(json_path), format='json')
-                model.save_model(str(pkl_path), format='pickle')
+                model.save_model(str(json_path))
+                model.save_model(str(pkl_path))
                 
                 model_paths[f'syllable_{n}gram'] = {
                     'json': str(json_path),
                     'pickle': str(pkl_path),
-                    'vocab_size': len(model.vocab),
-                    'total_ngrams': len(model.ngram_counts)
+                    'vocab_size': stats.vocabulary_size,
+                    'total_ngrams': stats.total_ngrams
                 }
                 
-                logger.info(f"   ✅ Syllable {n}-gram model: {len(model.vocab)} vocab, {len(model.ngram_counts):,} n-grams")
+                logger.info(f"   ✅ Syllable {n}-gram model: {stats.vocabulary_size} vocab, {stats.total_ngrams:,} n-grams")
             
             training_time = time.time() - start_time
             

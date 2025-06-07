@@ -45,14 +45,26 @@ def demo_quick_training():
         'character_ngrams': [3],
         'char_smoothing_method': 'laplace',  # Faster than good_turing
         'char_filter_non_khmer': True,
+        'char_keep_khmer_punctuation': True,
+        'char_keep_spaces': True,
         
         # Syllable N-gram models - only 2-gram for speed
         'syllable_ngrams': [2],
         'syll_smoothing_method': 'laplace',  # Faster than good_turing
         'syll_filter_non_khmer': True,
+        'syll_min_khmer_ratio': 0.5,
+        'syll_filter_multidigit_numbers': True,
+        'syll_max_digit_length': 2,
         
         # Neural models - disabled for quick demo
         'neural_enabled': False,
+        
+        # Ensemble configuration
+        'ensemble_neural_weight': 0.35,
+        'ensemble_statistical_weight': 0.45,
+        'ensemble_rule_weight': 0.20,
+        'ensemble_consensus_threshold': 0.65,
+        'ensemble_error_confidence_threshold': 0.50,
         
         # Performance settings
         'validate_models': True,
