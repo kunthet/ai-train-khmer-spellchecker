@@ -1,0 +1,45 @@
+{
+  "_description": "Production configuration for Khmer Spellchecker model training",
+  "_usage": "python train_models.py --data_dir /path/to/data --config production_training_config.json",
+  
+  "data_processing": {
+    "max_files": null,
+    "min_khmer_ratio": 0.6,
+    "min_text_length": 50,
+    "max_text_length": 10000,
+    "batch_size": 1000
+  },
+  
+  "character_ngrams": [3, 4, 5],
+  "char_smoothing_method": "good_turing",
+  "char_filter_non_khmer": true,
+  "char_keep_khmer_punctuation": true,
+  "char_keep_spaces": true,
+  
+  "syllable_ngrams": [2, 3, 4],
+  "syll_smoothing_method": "good_turing",
+  "syll_filter_non_khmer": true,
+  "syll_min_khmer_ratio": 0.5,
+  "syll_filter_multidigit_numbers": true,
+  "syll_max_digit_length": 2,
+  
+  "neural_enabled": true,
+  "neural_sequence_length": 20,
+  "neural_vocab_size": 8000,
+  "neural_embedding_dim": 128,
+  "neural_hidden_dim": 256,
+  "neural_num_layers": 2,
+  "neural_epochs": 10,
+  "neural_batch_size": 32,
+  "neural_learning_rate": 0.001,
+  
+  "ensemble_neural_weight": 0.35,
+  "ensemble_statistical_weight": 0.45,
+  "ensemble_rule_weight": 0.20,
+  "ensemble_consensus_threshold": 0.65,
+  "ensemble_error_confidence_threshold": 0.50,
+  
+  "validate_models": true,
+  "save_intermediate": true,
+  "detailed_logging": true
+} 

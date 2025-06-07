@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  # Main Khmer Spellchecker API
+  khmer-spellchecker:
+    build:
+      context: ..
+      dockerfile: production/Dockerfile
+    container_name: khmer-spellchecker-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../logs:/app/logs
+      - ../output:/app/output:ro
+      - ../models:/app/models:ro
+      - ./config.json:/app/production/config.json:ro
+    environment:
+      - PYTHONIOENCODING=utf-8
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - spellchecker-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.spellchecker.rule=Host(`spellchecker.local`)"
+      - "traefik.http.services.spellchecker.loadbalancer.server.port=8000"
+
+  # Nginx reverse proxy for load balancing
+  nginx:
+    image: nginx:alpine
+    container_name: khmer-spellchecker-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - khmer-spellchecker
+    networks:
+      - spellchecker-network
+
+  # Redis for caching (optional enhancement)
+  redis:
+    image: redis:7-alpine
+    container_name: khmer-spellchecker-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass spellchecker2025
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - spellchecker-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: khmer-spellchecker-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - spellchecker-network
+
+  # Grafana for monitoring dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: khmer-spellchecker-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=spellchecker2025
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - spellchecker-network
+
+  # Log aggregation with Filebeat
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.11.0
+    container_name: khmer-spellchecker-filebeat
+    restart: unless-stopped
+    user: root
+    volumes:
+      - ../logs:/var/log/spellchecker:ro
+      - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: filebeat -e -strict.perms=false
+    networks:
+      - spellchecker-network
+
+networks:
+  spellchecker-network:
+    driver: bridge
+    name: khmer-spellchecker-network
+
+volumes:
+  redis-data:
+    name: khmer-spellchecker-redis-data
+  prometheus-data:
+    name: khmer-spellchecker-prometheus-data
+  grafana-data:
+    name: khmer-spellchecker-grafana-data 
